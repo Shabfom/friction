@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Friction — Local AI Firewall</title>
+    <meta
+      name="description"
+      content="Local-first AI firewall that audits agent transactions before they execute."
+    />
+    <meta property="og:title" content="Friction — Local AI Firewall" />
+    <meta
+      property="og:description"
+      content="Local-first AI firewall that audits agent transactions before they execute."
+    />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" href="/favicon.ico" type="image/x-icon" />
+    <script>
+      (function () {
+        try {
+          var isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+          if (isDark) {
+            document.documentElement.classList.add('dark');
+            document.documentElement.classList.remove('light');
+            document.documentElement.style.colorScheme = 'dark';
+          } else {
+            document.documentElement.classList.remove('dark');
+            document.documentElement.classList.add('light');
+            document.documentElement.style.colorScheme = 'light';
+          }
+        } catch (_) {}
+      })();
+    </script>
+  </head>
+  <body class="bg-transparent select-none">
+    <div id="root" class="bg-transparent"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

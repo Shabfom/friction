@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+# friction: route AI agent traffic through the local Friction proxy.
+# Compatible with bash 3.2 (stock macOS).
+
+set -euo pipefail
+
+VERSION="0.1.0"
+PROG="friction"
+FRICTION_DIR="${HOME}/.friction"
+# The app writes the port it's listening on (8080 unless that was taken).
+DEFAULT_PORT=8080
+if [ -r "${FRICTION_DIR}/port" ]; then
+  _p="$(tr -dc '0-9' < "${FRICTION_DIR}/port")"
+  [ -n "$_p" ] && DEFAULT_PORT="$_p"
+fi
+CA_FILE="${FRICTION_DIR}/friction-root-ca.pem"
+BUNDLE_FILE="${FRICTION_DIR}/ca-bundle.pem"
+SYSTEM_ROOTS="/System/Library/Keychains/SystemRootCertificates.keychain"
+CA_VARS="NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE SSL_CERT_FILE CURL_CA_BUNDLE GIT_SSL_CAINFO AWS_CA_BUNDLE DENO_CERT CARGO_HTTP_CAINFO PIP_CERT"
+PROXY_VARS="HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy"
+LOCAL_HOSTS="localhost,127.0.0.1,::1"
+
+# Exit codes (sysexits.h)
+EX_USAGE=64
+EX_UNAVAILABLE=69
+EX_SOFTWARE=70
+
+usage() {
+  cat <<EOF
+Route an AI agent's traffic through Friction.
+
+Usage:
+  $PROG run [--name NAME] [--port PORT] [--] <command> [args...]
+  $PROG env [--name NAME] [--port PORT] [--fish]
+  $PROG status [--port PORT]
+  $PROG demo [--port PORT]
+  $PROG help | --version
+
+Examples:
+  $PROG run -- python agent.py
+  $PROG run --name shopper -- node agent.js
+  eval "\$($PROG env)"
+  $PROG env --fish | source
+EOF
+}
+
+die() {
+  # die CODE MESSAGE
+  local code="$1"
+  shift
+  printf '%s: %s\n' "$PROG" "$*" >&2
+  exit "$code"
+}
+
+usage_error() {
+  printf '%s: %s\n' "$PROG" "$*" >&2
+  printf "Run '%s help' for usage.\n" "$PROG" >&2
+  exit "$EX_USAGE"
+}
+
+sanitize_name() {
+  printf '%s' "$1" | LC_ALL=C sed 's/[^A-Za-z0-9._-]/-/g'
+}
+
+validate_port() {
+  case "$1" in
+    '' | *[!0-9]*) usage_error "invalid port: $1" ;;
+  esac
+  if [ "${#1}" -gt 5 ] || [ "$1" -lt 1 ] || [ "$1" -gt 65535 ]; then
+    usage_error "invalid port: $1"
+  fi
+}
+
+proxy_url() {
+  # proxy_url PORT [NAME]
+  if [ -n "${2:-}" ]; then
+    printf 'http://%s@127.0.0.1:%s' "$2" "$1"
+  else
+    printf 'http://127.0.0.1:%s' "$1"
+  fi
+}
+
+proxy_running() {
+  local out
+  out="$(curl -s --noproxy '*' --max-time 2 "http://127.0.0.1:$1/" 2>/dev/null || true)"
+  case "$out" in
+    *"Friction proxy is running"*) return 0 ;;
+  esac
+  return 1
+}
+
+require_app() {
+  if ! proxy_running "$1"; then
+    die "$EX_UNAVAILABLE" "the Friction app isn't running (nothing on 127.0.0.1:$1). Open Friction and try again."
+  fi
+}
+
+require_ca() {
+  if [ ! -f "$CA_FILE" ]; then
+    die "$EX_UNAVAILABLE" "no Friction CA at $(pretty_path "$CA_FILE"). Open the Friction app once to create it, then try again."
+  fi
+}
+
+pretty_path() {
+  case "$1" in
+    "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+bundle_stale() {
+  [ ! -s "$BUNDLE_FILE" ] && return 0
+  [ "$CA_FILE" -nt "$BUNDLE_FILE" ] && return 0
+  [ -n "$(find "$BUNDLE_FILE" -mtime +7 2>/dev/null)" ] && return 0
+  return 1
+}
+
+system_roots() {
+  if command -v security >/dev/null 2>&1; then
+    security find-certificate -a -p "$SYSTEM_ROOTS" 2>/dev/null || true
+  elif [ -r /etc/ssl/cert.pem ]; then
+    cat /etc/ssl/cert.pem
+  fi
+}
+
+ensure_bundle() {
+  require_ca
+  bundle_stale || return 0
+  local tmp
+  tmp="$(mktemp "${FRICTION_DIR}/.ca-bundle.XXXXXX")" ||
+    die "$EX_SOFTWARE" "couldn't write to $(pretty_path "$FRICTION_DIR")"
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmp'" EXIT
+  system_roots >"$tmp"
+  if ! grep -q 'BEGIN CERTIFICATE' "$tmp"; then
+    die "$EX_SOFTWARE" "couldn't read the macOS system root certificates"
+  fi
+  { printf '\n# Friction local CA\n'; cat "$CA_FILE"; } >>"$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$BUNDLE_FILE"
+  trap - EXIT
+}
+
+# Prints "VAR<TAB>value" lines for every variable we set.
+env_pairs() {
+  local port="$1" name="$2" url var no_proxy
+  url="$(proxy_url "$port" "$name")"
+  for var in $PROXY_VARS; do printf '%s\t%s\n' "$var" "$url"; done
+  no_proxy="${NO_PROXY:-${no_proxy:-}}"
+  if [ -n "$no_proxy" ]; then no_proxy="${no_proxy},${LOCAL_HOSTS}"; else no_proxy="$LOCAL_HOSTS"; fi
+  printf 'NO_PROXY\t%s\nno_proxy\t%s\n' "$no_proxy" "$no_proxy"
+  for var in $CA_VARS; do printf '%s\t%s\n' "$var" "$BUNDLE_FILE"; done
+  printf 'NODE_USE_ENV_PROXY\t1\n'
+}
+
+# parse_opts sets OPT_NAME, OPT_NAME_SET, OPT_PORT, OPT_FISH and REST_START
+# (number of args consumed). ALLOWED lists the options the subcommand takes.
+parse_opts() {
+  local allowed="$1"
+  shift
+  OPT_NAME="" OPT_NAME_SET=0 OPT_PORT="$DEFAULT_PORT" OPT_FISH=0 REST_START=0
+  while [ $# -gt 0 ]; do
+    local opt="$1" val=""
+    case "$opt" in
+      --name=* | --port=*) val="${opt#*=}"; opt="${opt%%=*}" ;;
+      --name | --port)
+        [ $# -ge 2 ] || usage_error "$opt needs a value"
+        val="$2"; shift; REST_START=$((REST_START + 1)) ;;
+    esac
+    case "$opt" in
+      --) REST_START=$((REST_START + 1)); return 0 ;;
+      -h | --help) usage; exit 0 ;;
+      -*)
+        case " $allowed " in
+          *" $opt "*) ;;
+          *) usage_error "unknown option: $opt" ;;
+        esac
+        case "$opt" in
+          --name) OPT_NAME="$(sanitize_name "$val")"; OPT_NAME_SET=1 ;;
+          --port) validate_port "$val"; OPT_PORT="$val" ;;
+          --fish) OPT_FISH=1 ;;
+        esac ;;
+      *) return 0 ;;
+    esac
+    shift
+    REST_START=$((REST_START + 1))
+  done
+}
+
+cmd_run() {
+  parse_opts "--name --port" "$@"
+  shift "$REST_START"
+  [ $# -gt 0 ] || usage_error "run: missing command (try '$PROG run -- python agent.py')"
+  local name="$OPT_NAME" port="$OPT_PORT" var val
+  if [ "$OPT_NAME_SET" -eq 0 ]; then name="$(sanitize_name "${1##*/}")"; fi
+  command -v -- "$1" >/dev/null 2>&1 || die 127 "command not found: $1"
+  require_app "$port"
+  ensure_bundle
+  while IFS="$(printf '\t')" read -r var val; do
+    export "$var=$val"
+  done <<EOF
+$(env_pairs "$port" "$name")
+EOF
+  if [ -t 2 ]; then
+    if [ -z "${NO_COLOR:-}" ]; then
+      printf '\033[2m%s: routing %s through 127.0.0.1:%s\033[0m\n' "$PROG" "${name:-$1}" "$port" >&2
+    else
+      printf '%s: routing %s through 127.0.0.1:%s\n' "$PROG" "${name:-$1}" "$port" >&2
+    fi
+  fi
+  exec "$@"
+}
+
+quote_sh() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+quote_fish() { printf "'%s'" "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g")"; }
+
+cmd_env() {
+  parse_opts "--name --port --fish" "$@"
+  shift "$REST_START"
+  [ $# -eq 0 ] || usage_error "env: unexpected argument: $1"
+  ensure_bundle
+  local var val
+  env_pairs "$OPT_PORT" "$OPT_NAME" | while IFS="$(printf '\t')" read -r var val; do
+    if [ "$OPT_FISH" -eq 1 ]; then
+      printf 'set -gx %s %s;\n' "$var" "$(quote_fish "$val")"
+    else
+      printf 'export %s=%s\n' "$var" "$(quote_sh "$val")"
+    fi
+  done
+}
+
+cmd_status() {
+  parse_opts "--port" "$@"
+  shift "$REST_START"
+  [ $# -eq 0 ] || usage_error "status: unexpected argument: $1"
+  local port="$OPT_PORT" rc=0 trust
+  if proxy_running "$port"; then
+    printf '%-10s listening on 127.0.0.1:%s\n' proxy "$port"
+  else
+    printf '%-10s not running (nothing on 127.0.0.1:%s)\n' proxy "$port"
+    rc=1
+  fi
+  if [ ! -f "$CA_FILE" ]; then
+    trust="missing; open Friction once to create it"
+  elif ! command -v security >/dev/null 2>&1; then
+    trust="trust unknown"
+  elif security verify-cert -c "$CA_FILE" >/dev/null 2>&1; then
+    trust="trusted"
+  else
+    trust="not trusted by macOS"
+  fi
+  printf '%-10s %s (%s)\n' cert "$(pretty_path "$CA_FILE")" "$trust"
+  return "$rc"
+}
+
+cmd_demo() {
+  parse_opts "--port" "$@"
+  shift "$REST_START"
+  [ $# -eq 0 ] || usage_error "demo: unexpected argument: $1"
+  local port="$OPT_PORT"
+  require_app "$port"
+  # Same shape as a real Stripe PaymentIntent ($279.00). The .invalid host
+  # never resolves; Friction answers it itself, so nothing leaves the Mac.
+  curl -s --max-time 130 -x "$(proxy_url "$port" demo-agent)" \
+    -H 'Content-Type: application/x-www-form-urlencoded' \
+    -d 'amount=27900&currency=usd&description=Wireless+headphones&confirm=true' \
+    http://demo.friction.invalid/v1/payment_intents >/dev/null 2>&1 </dev/null &
+  echo "Sent. Check Friction."
+}
+
+main() {
+  [ $# -gt 0 ] || { usage; exit 0; }
+  local sub="$1"
+  shift
+  case "$sub" in
+    run) cmd_run "$@" ;;
+    env) cmd_env "$@" ;;
+    status) cmd_status "$@" ;;
+    demo) cmd_demo "$@" ;;
+    help | -h | --help) usage ;;
+    --version | version) echo "$PROG $VERSION" ;;
+    *) usage_error "unknown command: $sub" ;;
+  esac
+}
+
+main "$@"
