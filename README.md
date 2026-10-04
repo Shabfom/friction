@@ -2,6 +2,8 @@
 
 A local firewall and flight recorder for AI agents on macOS.
 
+![Friction holding a $279 payment and a leaked API key](docs/demo.gif)
+
 ```sh
 friction run -- python agent.py
 ```
