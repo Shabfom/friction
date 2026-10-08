@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Holding an HTTP request until a human says yes</title>
+<meta name="description" content="Notes from building Friction, an HTTPS-intercepting proxy for AI agents in Rust with hyper 1, rustls and rcgen: per-host certificates, parking requests for approval, and reading streamed responses without buffering them.">
+<meta property="og:title" content="Holding an HTTP request until a human says yes">
+<meta property="og:description" content="An HTTPS-intercepting proxy for AI agents in Rust: per-host certificates, parking requests for approval, and tapping streamed responses.">
+<meta property="og:image" content="https://shabfom.github.io/friction/og.png">
+<meta property="og:type" content="article">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+<nav><a href="./">Friction</a><a href="building-a-proxy-in-rust.html">How it's built</a><a href="https://github.com/Shabfom/friction">GitHub</a></nav>
+
+<h1>Holding an HTTP request until a human says yes</h1>
+<p class="meta">Shane · October 2026 · notes from building <a href="./">Friction</a> in Rust</p>
+
+<p class="lead">Friction is a local proxy that sits between AI agents and the internet. When an agent tries to pay for something or send an API key to the wrong place, the request stops and waits for me to click allow or block. Building that in Rust meant solving a few problems I hadn't dealt with before. These are the ones worth writing down.</p>
+
+<p>The stack is hyper 1 for HTTP, tokio-rustls for TLS, rcgen for certificates, and Tauri for the menu bar UI. Agents reach the proxy through the usual <code>HTTPS_PROXY</code> variable, which <code>friction run -- python agent.py</code> sets for one process along with the CA bundle variables that Python, Node, curl and git each read.</p>
+
+<h2>1. Being every server at once</h2>
+
+<p>To read an HTTPS request, the proxy has to terminate TLS itself. An agent sends <code>CONNECT api.stripe.com:443</code>, the proxy answers 200, and from then on the agent expects to be talking TLS to Stripe. So the proxy needs a certificate for <code>api.stripe.com</code> that the agent will accept.</p>
+
+<p>On first launch Friction generates a root CA with rcgen and writes the key with 0600 permissions. For each host it mints a leaf certificate signed by that CA, builds a rustls <code>ServerConfig</code> around it, and caches the config by host name:</p>
+
+<pre><code>pub fn server_config_for(&amp;self, host: &amp;str) -&gt; Result&lt;Arc&lt;ServerConfig&gt;, BoxErr&gt; {
+    if let Some(cfg) = self.cache.lock().unwrap().get(host) {
+        return Ok(cfg.clone());
+    }
+    let mut params = CertificateParams::new(vec![host.to_string()])?;
+    params.is_ca = IsCa::NoCa;
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    params.use_authority_key_identifier_extension = true;
+    // ...validity window, random serial...
+    let leaf_key = KeyPair::generate()?;
+    let leaf = params.signed_by(&amp;leaf_key, &amp;self.issuer, &amp;self.issuer_key)?;
+
+    let mut cfg = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![leaf.der().clone()], key_der(&amp;leaf_key))?;
+    cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    // cache and return
+}</code></pre>
+
+<p>Two details mattered. The leaf carries an authority key identifier, which some TLS clients use to find the issuing certificate when they build the chain back to the root. And ALPN is pinned to <code>http/1.1</code>, so clients don't negotiate HTTP/2 with a proxy that only speaks HTTP/1.1 on the inner connection.</p>
+
+<p>After the 200, the CONNECT request is upgraded and the raw stream is handed to a TLS acceptor. The decrypted stream then gets its own hyper connection, served by the same request handler as plain HTTP, with the target host carried along:</p>
+
+<pre><code>tokio::spawn(async move {
+    let upgraded = hyper::upgrade::on(req).await?;
+    let tls = TlsAcceptor::from(server_cfg).accept(TokioIo::new(upgraded)).await?;
+    let target = Target { https: true, host, port, agent };
+    let service = service_fn(move |r| handle_request(app.clone(), state.clone(), Some(target.clone()), r));
+    http1::Builder::new().serve_connection(TokioIo::new(tls), service).await
+});</code></pre>
+
+<p>That reuse was the best decision in the codebase. Every rule, from payment detection to spend metering, is written once and applies to HTTP and HTTPS the same way.</p>
+
+<h2>2. Parking a request</h2>
+
+<p>When a request needs approval, the handler can't return. It has to wait, possibly for a minute, while a notification goes out and the UI shows what the agent is sending. A <code>tokio::sync::oneshot</code> channel is the natural fit: the sender goes into a map of pending requests that the UI's "allow" and "block" commands look up by id, and the handler awaits the receiver with a timeout.</p>
+
+<pre><code>let (tx, rx) = oneshot::channel();
+state.pending.lock().unwrap().insert(id.clone(), Pending { tx, payload: payload.clone() });
+let mut guard = HoldGuard { armed: true, /* what to log if we never get an answer */ };
+
+let decision = tokio::time::timeout(Duration::from_secs(120), rx).await;
+guard.armed = false;
+match decision {
+    Ok(Ok(Decision::Approve)) =&gt; { /* forward upstream */ }
+    Ok(Ok(Decision::Reject)) =&gt; return Ok(text(403, "Friction: transaction was rejected by the user.")),
+    _ =&gt; { /* timed out: blocked */ }
+}</code></pre>
+
+<p>The interesting case is the one that isn't in the match. If the agent gives up and closes the connection, hyper drops the handler's future. No timeout fires and no branch runs; the code after the <code>.await</code> simply never executes. Without care, the request would sit in the UI forever, waiting for a decision no one can act on.</p>
+
+<p>The fix is a guard whose <code>Drop</code> does the cleanup. It's armed while waiting and disarmed once a decision comes back normally. If the future is dropped while the guard is still armed, the drop removes the pending entry, tells the UI it expired, and records it as blocked with "Agent disconnected":</p>
+
+<pre><code>impl Drop for HoldGuard {
+    fn drop(&amp;mut self) {
+        if !self.armed { return; }
+        let was_pending = self.state.pending.lock().unwrap().remove(&amp;self.payload.id).is_some();
+        if !was_pending { return; }
+        let _ = self.app.emit("intercept:expired", &amp;self.payload.id);
+        // ...write the audit entry...
+    }
+}</code></pre>
+
+<p>Cancellation in async Rust is easy to forget because it is silent. Treating "my future might just stop here" as a normal path, and putting the cleanup in a destructor, made the whole hold flow robust.</p>
+
+<h2>3. Watching a stream without holding it up</h2>
+
+<p>Friction meters what agents spend on AI APIs by reading the token counts in each response. Many of those responses are server-sent event streams that run for a minute or more, and buffering them would break the agent's streaming. The counts are usually at the start (Anthropic's <code>message_start</code>) or the end (OpenAI's final usage chunk) of the stream.</p>
+
+<p>So the response body is wrapped in a small <code>http_body::Body</code> that passes every frame straight through while keeping a copy of the first and last 256 KB:</p>
+
+<pre><code>impl hyper::body::Body for TapBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(self: Pin&lt;&amp;mut Self&gt;, cx: &amp;mut Context&lt;'_&gt;)
+        -&gt; Poll&lt;Option&lt;Result&lt;Frame&lt;Bytes&gt;, hyper::Error&gt;&gt;&gt;&gt;
+    {
+        let this = self.get_mut();
+        match this.inner.as_mut().poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) =&gt; {
+                if let Some(d) = frame.data_ref() { this.capture(d); }
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(None) =&gt; { this.finish(true); Poll::Ready(None) }
+            other =&gt; other,  // Pending, or an error (which also calls finish(false))
+        }
+    }
+}
+
+impl Drop for TapBody {
+    fn drop(&amp;mut self) { self.finish(false); }
+}</code></pre>
+
+<p><code>capture</code> fills the head up to the limit, then appends to a tail that it trims from the front, so memory stays bounded however long the stream runs. <code>finish</code> runs exactly once (it takes a <code>FnOnce</code> out of an <code>Option</code>), either at the end of the stream or from <code>Drop</code> if the client hangs up, and hands the captured bytes to the code that parses usage and prices the call.</p>
+
+<p>One shortcut made this practical: for AI API hosts, the proxy rewrites the request's <code>Accept-Encoding</code> to <code>identity</code>. Responses from those APIs come back uncompressed, so the tap can parse them as they are. It costs a little bandwidth and saves a streaming decompressor.</p>
+
+<h2>4. Reading money out of a request</h2>
+
+<p>Payment detection is deliberately boring: a table of documented endpoints, matched on method, host and path, with a parser per processor for the amount. The traps were in the units. Stripe, Square and Adyen send amounts in the currency's minor unit, so <code>amount=27900</code> with <code>currency=usd</code> is $279.00. But some currencies have no minor unit, and for those the number is already whole:</p>
+
+<pre><code>const ZERO_DECIMAL: &amp;[&amp;str] =
+    &amp;["bif", "clp", "djf", "gnf", "jpy", "kmf", "krw", "mga", "pyg", "rwf", "ugx", "vnd", "vuv", "xaf", "xof", "xpf"];
+
+fn from_minor(value: f64, currency: &amp;str) -&gt; f64 {
+    if ZERO_DECIMAL.contains(&amp;currency.to_ascii_lowercase().as_str()) { value } else { value / 100.0 }
+}</code></pre>
+
+<p>Getting this wrong would show a ¥5,000 charge as ¥50, which is exactly the kind of number a person approves without thinking. PayPal and Coinbase send decimal strings instead, so they skip the conversion.</p>
+
+<h2>5. Config that can't fail open</h2>
+
+<p>Rules live in <code>~/.friction/rules.toml</code>, which people edit by hand while agents are running. A background task checks the file's modification time every second and reparses when it changes. A parse error never replaces the loaded rules: Friction keeps enforcing the last good version and shows the error with its line number until the file is fixed. For a tool whose job is to stop things, a typo shouldn't be able to turn the protection off.</p>
+
+<h2>What's next</h2>
+
+<p>Friction only sees traffic from programs that use its proxy. That covers most agent tooling, since Python, Node, curl and git all honor the proxy and CA variables, but code that opens its own sockets goes around it. Closing that gap means a macOS network extension, which is the next big piece. HTTP/2 between agent and proxy is the other.</p>
+
+<p>The code is MIT licensed and on <a href="https://github.com/Shabfom/friction">GitHub</a>. I'd especially like feedback on the proxy internals; I'm sure parts of this can be done better.</p>
+
+<p><em>I built Friction with a lot of help from Claude, and this post was written with Claude too. The design decisions, testing and maintenance are mine.</em></p>
+
+<footer><a href="./">Friction</a> · <a href="https://github.com/Shabfom/friction">GitHub</a></footer>
+</main>
+</body>
+</html>

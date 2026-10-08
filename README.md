@@ -2,6 +2,8 @@
 
 A local firewall and flight recorder for AI agents on macOS.
 
+[Website](https://shabfom.github.io/friction/) · [Download](https://github.com/Shabfom/friction/releases/latest) · [How the proxy works](https://shabfom.github.io/friction/building-a-proxy-in-rust.html)
+
 ![Friction holding a $279 payment and a leaked API key](docs/demo.gif)
 
 ```sh
@@ -26,7 +28,13 @@ Held requests show exactly what the agent is sending. Allow with ⌘↩, block w
 
 ## Install
 
-Download `Friction_0.1.0_universal.dmg` from Releases (Apple Silicon and Intel), drag Friction to Applications, and open it.
+With Homebrew:
+
+```sh
+brew install --cask shabfom/tap/friction
+```
+
+This installs the app and the `friction` command. Or download `Friction_0.1.0_universal.dmg` from [Releases](https://github.com/Shabfom/friction/releases/latest) (Apple Silicon and Intel), drag Friction to Applications, and open it.
 
 > The app isn't notarized yet. On first launch macOS will refuse to open it; go to System Settings → Privacy & Security and click "Open Anyway".
 

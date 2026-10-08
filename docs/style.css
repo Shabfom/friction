@@ -1,0 +1,48 @@
+:root {
+  --bg: #fbfbfa;
+  --text: #1d1d1f;
+  --muted: #6b6b70;
+  --line: #e4e4e2;
+  --code-bg: #f2f2f0;
+  --accent: #c2410c;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141416;
+    --text: #e8e8ea;
+    --muted: #9a9aa2;
+    --line: #2a2a2e;
+    --code-bg: #1d1d21;
+    --accent: #fb923c;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 17px/1.65 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+}
+main { max-width: 700px; margin: 0 auto; padding: 48px 20px 80px; }
+nav { display: flex; gap: 18px; font-size: 15px; margin-bottom: 40px; }
+nav a { color: var(--muted); text-decoration: none; }
+nav a:hover { color: var(--text); }
+h1 { font-size: 34px; line-height: 1.2; letter-spacing: -0.02em; margin: 0 0 12px; }
+h2 { font-size: 22px; letter-spacing: -0.01em; margin: 44px 0 10px; }
+p, ul, ol { margin: 0 0 18px; }
+li { margin-bottom: 6px; }
+a { color: var(--accent); }
+.lead { font-size: 19px; color: var(--muted); margin-bottom: 28px; }
+.meta { color: var(--muted); font-size: 14px; margin-bottom: 36px; }
+code { font: 0.88em ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x: auto; margin: 0 0 22px; font-size: 14px; line-height: 1.5; }
+pre code { background: none; padding: 0; font-size: inherit; }
+img { max-width: 100%; height: auto; border-radius: 8px; border: 1px solid var(--line); }
+.cta { display: flex; flex-wrap: wrap; gap: 10px; margin: 26px 0 34px; }
+.btn { display: inline-block; padding: 9px 16px; border-radius: 7px; text-decoration: none; font-weight: 600; font-size: 15px; border: 1px solid var(--line); color: var(--text); }
+.btn.primary { background: var(--text); color: var(--bg); border-color: var(--text); }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 18px 28px; margin: 34px 0; }
+.grid h3 { font-size: 16px; margin: 0 0 4px; }
+.grid p { font-size: 15px; color: var(--muted); margin: 0; }
+footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }

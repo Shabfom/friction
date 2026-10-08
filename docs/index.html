@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Friction: ask before your AI agent spends money</title>
+<meta name="description" content="A macOS menu bar app with a local proxy that holds AI agents' payment requests and leaked API keys for your approval, and meters their API spend. Free and open source.">
+<meta property="og:title" content="Friction: ask before your AI agent spends money">
+<meta property="og:description" content="A local proxy for AI agents on macOS. Holds payments and leaked keys for approval, caps API spend, records every request.">
+<meta property="og:image" content="https://shabfom.github.io/friction/og.png">
+<meta property="og:url" content="https://shabfom.github.io/friction/">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+<nav><a href="./">Friction</a><a href="building-a-proxy-in-rust.html">How it's built</a><a href="https://github.com/Shabfom/friction">GitHub</a></nav>
+
+<h1>Ask before your AI agent spends money</h1>
+<p class="lead">Friction is a macOS menu bar app with a local proxy for AI agents. It holds payments and leaked API keys until you say yes, caps what agents spend on AI APIs, and records every request they make.</p>
+
+<div class="cta">
+  <a class="btn primary" href="https://github.com/Shabfom/friction/releases/latest">Download for Mac</a>
+  <a class="btn" href="https://github.com/Shabfom/friction">View on GitHub</a>
+</div>
+
+<pre><code>brew install --cask shabfom/tap/friction
+friction run -- python agent.py</code></pre>
+
+<img src="demo.gif" alt="Friction holding a $279 Stripe payment and a request leaking API keys, then blocking both" width="960" height="696">
+
+<div class="grid">
+  <div><h3>Payments wait for you</h3><p>Stripe, PayPal, Square, Adyen, Coinbase and more are held with the amount read from the request. Allow with ⌘↩, block with ⌘⌫.</p></div>
+  <div><h3>Keys stay home</h3><p>An API key headed anywhere but its own service is held. Your Anthropic key to Anthropic is fine; in a pastebin upload it isn't.</p></div>
+  <div><h3>Spend has a ceiling</h3><p>Token counts are read from every AI response, streamed or not. Set a daily cap overall or per agent.</p></div>
+  <div><h3>Everything is on the record</h3><p>Every request with headers, bodies, timing and cost. Export to HAR for DevTools, Charles or Proxyman.</p></div>
+</div>
+
+<p>Everything runs on your Mac: no account, no cloud, no telemetry. HTTPS inspection uses a certificate generated on your machine that never leaves it. Friction covers programs that use its proxy, which <code>friction run</code> sets up for you.</p>
+
+<p>Free and MIT licensed. macOS 11 or later, Apple Silicon and Intel.</p>
+
+<footer>Made by <a href="https://github.com/Shabfom">Shane</a>. Read <a href="building-a-proxy-in-rust.html">how the proxy works</a>.</footer>
+</main>
+</body>
+</html>
